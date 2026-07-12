@@ -14,6 +14,11 @@ impl<S> Runtime<S>
 where
     S: Service,
 {
+    /// Constructs a runtime with a server listening on a systemd-passed socket
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there no systemd socket is passed
     pub fn new_with_systemd_socket(service: S) -> Result<Self, Error<S>> {
         Ok(Self {
             service,
@@ -21,6 +26,11 @@ where
         })
     }
 
+    /// Constructs a runtime with a server listening on a given socket path
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the server fails to `socket()`->`listen()`
     pub fn new_with_socket_path(path: &str, service: S) -> Result<Self, Error<S>> {
         Ok(Self {
             service,
@@ -43,6 +53,15 @@ where
             .collect())
     }
 
+    /// Polls the server, clients, and all FDs managed by your service
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// 1. `poll()` failed
+    /// 2. `poll()` failed for serverfd
+    /// 3. the server failed to `accept()` new client connection
+    /// 4. your service returned an error from one of the dispatched methods
     pub fn poll(&mut self) -> Result<(), Error<S>> {
         for (fd, revents) in self.poll0()? {
             let is_err = revents.intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL);

@@ -2,6 +2,10 @@
 name = "pollsendd"
 version = "0.1.0"
 edition = "2024"
+description = "A tiny utility library to write poll-based systemd services"
+license = "MIT"
+repository = "https://github.com/iliabylich/pollsendd"
+authors = ["Ilya Bylich <ibylich@gmail.com>"]
 
 [dependencies]
 log = "0.4"

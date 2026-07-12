@@ -1,4 +1,4 @@
-use crate::{AsPollFd, Service, Error, client::Client};
+use crate::{AsPollFd, Error, Service, client::Client};
 use rustix::{
     event::{PollFd, PollFlags},
     fs::Mode,
@@ -133,6 +133,8 @@ pub fn socket_at<S>(socket_path: &str) -> Result<OwnedFd, Error<S>>
 where
     S: Service,
 {
+    const SOMAXCONN: i32 = 4_096;
+
     let addr = SocketAddrUnix::new(socket_path)?;
     ensure_addr_is_free(&addr)?;
 
@@ -144,7 +146,6 @@ where
     }
     rustix::net::bind(&fd, &addr)?;
     rustix::fs::chmod(socket_path, Mode::from_raw_mode(0o666))?;
-    const SOMAXCONN: i32 = 4_096;
     rustix::net::listen(&fd, SOMAXCONN)?;
 
     log::trace!("Listening on {socket_path}");

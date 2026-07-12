@@ -59,7 +59,7 @@ impl AsPollFd for Client {
 }
 
 #[derive(Debug)]
-pub(crate) enum ClientError {
+pub enum ClientError {
     Errno(Errno),
     FailedToRead,
     FailedToWrite,
