@@ -1,6 +1,7 @@
 use crate::AsPollFd;
 use rustix::{
     event::{PollFd, PollFlags},
+    fs::{OFlags, fcntl_getfl, fcntl_setfl},
     io::Errno,
     net::{RecvFlags, SendFlags},
 };
@@ -19,24 +20,33 @@ pub struct Client<const REQUEST_SIZE: usize> {
 }
 
 impl<const REQUEST_SIZE: usize> Client<REQUEST_SIZE> {
-    pub(crate) const fn new(fd: OwnedFd) -> Self {
-        Self {
+    pub(crate) fn new(fd: OwnedFd) -> Result<Self, Errno> {
+        let mut flags = fcntl_getfl(&fd)?;
+        flags.insert(OFlags::NONBLOCK);
+        fcntl_setfl(&fd, flags)?;
+
+        Ok(Self {
             fd,
             readbuf: [0; _],
             readpos: 0,
             writebuf: VecDeque::new(),
-        }
+        })
     }
 
     pub(crate) fn read_once(&mut self) -> Result<Option<[u8; REQUEST_SIZE]>, ClientError> {
         log::trace!("Reading from client {}..", self.as_raw_fd());
 
-        let (bytes_read, _) = rustix::net::recv(
+        let bytes_read = match rustix::net::recv(
             &self.fd,
             &mut self.readbuf[self.readpos..],
             RecvFlags::empty(),
-        )
-        .map_err(ClientError::Errno)?;
+        ) {
+            Ok((0, _)) => return Err(ClientError::FailedToRead),
+            Ok((len, _)) => len,
+            Err(err) if err.kind() == ErrorKind::WouldBlock => return Ok(None),
+            Err(err) => return Err(ClientError::Errno(err)),
+        };
+
         self.readpos = self
             .readpos
             .checked_add(bytes_read)
@@ -66,6 +76,7 @@ impl<const REQUEST_SIZE: usize> Client<REQUEST_SIZE> {
             };
 
             let bytes_written = match rustix::net::send(&self.fd, buf, SendFlags::NOSIGNAL) {
+                Ok(0) => return Err(ClientError::FailedToWrite),
                 Ok(len) => len,
                 Err(err) if err.kind() == ErrorKind::WouldBlock => break,
                 Err(err) => return Err(ClientError::Errno(err)),

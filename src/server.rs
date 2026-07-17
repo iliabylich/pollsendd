@@ -52,7 +52,7 @@ impl<const REQUEST_SIZE: usize> Server<REQUEST_SIZE> {
         log::trace!("Accepting a new client");
         let fd = rustix::net::accept(&self.fd)?;
         let rawfd = fd.as_raw_fd();
-        self.fd_to_client.insert(rawfd, Client::new(fd));
+        self.fd_to_client.insert(rawfd, Client::new(fd)?);
         Ok(rawfd)
     }
 
