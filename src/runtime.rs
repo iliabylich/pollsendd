@@ -2,24 +2,24 @@ use crate::{Error, Service, server::Server};
 use rustix::event::PollFlags;
 use std::os::fd::{AsFd, AsRawFd};
 
-pub struct Runtime<S>
+pub struct Runtime<const REQUEST_SIZE: usize, S>
 where
-    S: Service,
+    S: Service<REQUEST_SIZE>,
 {
     service: S,
-    server: Server,
+    server: Server<REQUEST_SIZE>,
 }
 
-impl<S> Runtime<S>
+impl<const REQUEST_SIZE: usize, S> Runtime<REQUEST_SIZE, S>
 where
-    S: Service,
+    S: Service<REQUEST_SIZE>,
 {
     /// Constructs a runtime with a server listening on a systemd-passed socket
     ///
     /// # Errors
     ///
     /// Returns an error if there no systemd socket is passed
-    pub fn new_with_systemd_socket(service: S) -> Result<Self, Error<S>> {
+    pub fn new_with_systemd_socket(service: S) -> Result<Self, Error<REQUEST_SIZE, S>> {
         Ok(Self {
             service,
             server: Server::new_with_systemd_socket()?,
@@ -31,14 +31,14 @@ where
     /// # Errors
     ///
     /// Returns an error if the server fails to `socket()`->`listen()`
-    pub fn new_with_socket_path(path: &str, service: S) -> Result<Self, Error<S>> {
+    pub fn new_with_socket_path(path: &str, service: S) -> Result<Self, Error<REQUEST_SIZE, S>> {
         Ok(Self {
             service,
             server: Server::new_with_socket_path(path)?,
         })
     }
 
-    fn poll0(&mut self) -> Result<Vec<(i32, PollFlags)>, Error<S>> {
+    fn poll0(&mut self) -> Result<Vec<(i32, PollFlags)>, Error<REQUEST_SIZE, S>> {
         let mut pollfds = self
             .server
             .pollfds()
@@ -62,7 +62,7 @@ where
     /// 2. `poll()` failed for serverfd
     /// 3. the server failed to `accept()` new client connection
     /// 4. your service returned an error from one of the dispatched methods
-    pub fn poll(&mut self) -> Result<(), Error<S>> {
+    pub fn poll(&mut self) -> Result<(), Error<REQUEST_SIZE, S>> {
         for (fd, revents) in self.poll0()? {
             let is_err = revents.intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL);
             let is_readable = revents.contains(PollFlags::IN);
@@ -73,11 +73,20 @@ where
             }
 
             if fd == self.server.as_raw_fd() && is_readable {
-                self.server.accept()?;
-            } else if self.server.contains_client(fd) && is_readable && self.server.read_client(fd)
-            {
-                for buf in self.service.state_as_serialized_bufs() {
-                    self.server.write_client(fd, &buf);
+                let clientfd = self.server.accept()?;
+                self.service
+                    .on_client_connected(|buf| self.server.push_to_client(clientfd, buf))
+                    .map_err(Error::CustomError)?;
+            } else if self.server.contains_client(fd) {
+                if is_readable {
+                    while let Some(request) = self.server.read_client_once(fd) {
+                        self.service
+                            .on_client_request(request)
+                            .map_err(Error::CustomError)?;
+                    }
+                }
+                if is_writable {
+                    self.server.write_client(fd);
                 }
             } else if self.service.owns_fd(fd) {
                 if is_readable {
@@ -94,7 +103,7 @@ where
         Ok(())
     }
 
-    fn on_error(&mut self, fd: i32, revents: PollFlags) -> Result<(), Error<S>> {
+    fn on_error(&mut self, fd: i32, revents: PollFlags) -> Result<(), Error<REQUEST_SIZE, S>> {
         if fd == self.server.as_raw_fd() {
             Err(Error::FailedToPollServer)
         } else if self.server.contains_client(fd) {

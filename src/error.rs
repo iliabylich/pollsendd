@@ -1,9 +1,9 @@
 use crate::Service;
 use rustix::io::Errno;
 
-pub enum Error<S>
+pub enum Error<const REQUEST_SIZE: usize, S>
 where
-    S: Service,
+    S: Service<REQUEST_SIZE>,
 {
     AlreadyRunning,
     FailedToGetSystemdProvidedSocket,
@@ -13,9 +13,9 @@ where
     FailedToPollServer,
 }
 
-impl<S> core::fmt::Display for Error<S>
+impl<const REQUEST_SIZE: usize, S> core::fmt::Display for Error<REQUEST_SIZE, S>
 where
-    S: Service,
+    S: Service<REQUEST_SIZE>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -29,20 +29,23 @@ where
     }
 }
 
-impl<S> core::fmt::Debug for Error<S>
+impl<const REQUEST_SIZE: usize, S> core::fmt::Debug for Error<REQUEST_SIZE, S>
 where
-    S: Service,
+    S: Service<REQUEST_SIZE>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{self}")
     }
 }
 
-impl<S> core::error::Error for Error<S> where S: Service {}
+impl<const REQUEST_SIZE: usize, S> core::error::Error for Error<REQUEST_SIZE, S> where
+    S: Service<REQUEST_SIZE>
+{
+}
 
-impl<S> From<Errno> for Error<S>
+impl<const REQUEST_SIZE: usize, S> From<Errno> for Error<REQUEST_SIZE, S>
 where
-    S: Service,
+    S: Service<REQUEST_SIZE>,
 {
     fn from(err: Errno) -> Self {
         Self::Errno(err)

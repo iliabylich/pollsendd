@@ -40,7 +40,7 @@ impl Timer {
     }
 }
 
-impl Service for Timer {
+impl Service<2> for Timer {
     type Error = TimerError;
 
     fn pollfds(&mut self) -> Result<impl Iterator<Item = PollFd<'_>>, Self::Error> {
@@ -75,8 +75,14 @@ impl Service for Timer {
         Err(TimerError::FailedToPollTimer(revents))
     }
 
-    fn state_as_serialized_bufs(&self) -> impl Iterator<Item = Vec<u8>> {
-        [42_u64.to_be_bytes().to_vec()].into_iter()
+    fn on_client_connected(&mut self, mut write: impl FnMut(Vec<u8>)) -> Result<(), Self::Error> {
+        (write)(b"hello".to_vec());
+        Ok(())
+    }
+
+    fn on_client_request(&mut self, request: [u8; 2]) -> Result<(), Self::Error> {
+        log::info!("client request: {request:?}");
+        Ok(())
     }
 }
 

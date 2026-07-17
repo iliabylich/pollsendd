@@ -10,12 +10,12 @@ use std::{
     os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd},
 };
 
-pub struct Server {
+pub struct Server<const REQUEST_SIZE: usize> {
     fd: OwnedFd,
-    fd_to_client: HashMap<i32, Client>,
+    fd_to_client: HashMap<i32, Client<REQUEST_SIZE>>,
 }
 
-impl Server {
+impl<const REQUEST_SIZE: usize> Server<REQUEST_SIZE> {
     fn new(fd: OwnedFd) -> Self {
         log::trace!("serverfd = {fd:?}");
         Self {
@@ -24,16 +24,16 @@ impl Server {
         }
     }
 
-    pub(crate) fn new_with_systemd_socket<S>() -> Result<Self, Error<S>>
+    pub(crate) fn new_with_systemd_socket<S>() -> Result<Self, Error<REQUEST_SIZE, S>>
     where
-        S: Service,
+        S: Service<REQUEST_SIZE>,
     {
         Ok(Self::new(systemd_socket()?))
     }
 
-    pub(crate) fn new_with_socket_path<S>(path: &str) -> Result<Self, Error<S>>
+    pub(crate) fn new_with_socket_path<S>(path: &str) -> Result<Self, Error<REQUEST_SIZE, S>>
     where
-        S: Service,
+        S: Service<REQUEST_SIZE>,
     {
         Ok(Self::new(socket_at(path)?))
     }
@@ -45,47 +45,48 @@ impl Server {
             .chain([self.as_poll_fd()])
     }
 
-    pub(crate) fn accept<S>(&mut self) -> Result<(), Error<S>>
+    pub(crate) fn accept<S>(&mut self) -> Result<i32, Error<REQUEST_SIZE, S>>
     where
-        S: Service,
+        S: Service<REQUEST_SIZE>,
     {
         log::trace!("Accepting a new client");
         let fd = rustix::net::accept(&self.fd)?;
-        self.fd_to_client.insert(fd.as_raw_fd(), Client::new(fd));
-        Ok(())
+        let rawfd = fd.as_raw_fd();
+        self.fd_to_client.insert(rawfd, Client::new(fd));
+        Ok(rawfd)
     }
 
     pub(crate) fn broadcast(&mut self, buf: &[u8]) {
         log::trace!("Broadcasting to {} clients..", self.fd_to_client.len());
-        let mut fds_to_drop = vec![];
-        for (fd, client) in &self.fd_to_client {
-            if let Err(err) = client.write(buf) {
+        for client in self.fd_to_client.values_mut() {
+            client.push(buf.to_vec());
+        }
+    }
+
+    pub(crate) fn read_client_once(&mut self, fd: i32) -> Option<[u8; REQUEST_SIZE]> {
+        let client = self.fd_to_client.get_mut(&fd)?;
+        match client.read_once() {
+            Ok(req) => req,
+            Err(err) => {
                 log::error!("{err:?}");
-                fds_to_drop.push(*fd);
+                self.fd_to_client.remove(&fd);
+                None
             }
         }
-        for fd in fds_to_drop {
-            self.fd_to_client.remove(&fd);
-        }
     }
 
-    pub(crate) fn read_client(&mut self, fd: i32) -> bool {
-        let Some(client) = self.fd_to_client.get(&fd) else {
-            return false;
-        };
-        if let Err(err) = client.read() {
-            log::error!("{err:?}");
-            self.fd_to_client.remove(&fd);
-            return false;
-        }
-        true
-    }
-
-    pub(crate) fn write_client(&mut self, fd: i32, buf: &[u8]) {
-        let Some(client) = self.fd_to_client.get(&fd) else {
+    pub(crate) fn push_to_client(&mut self, fd: i32, buf: Vec<u8>) {
+        let Some(client) = self.fd_to_client.get_mut(&fd) else {
             return;
         };
-        if let Err(err) = client.write(buf) {
+        client.push(buf);
+    }
+
+    pub(crate) fn write_client(&mut self, fd: i32) {
+        let Some(client) = self.fd_to_client.get_mut(&fd) else {
+            return;
+        };
+        if let Err(err) = client.write() {
             log::error!("{err:?}");
             self.fd_to_client.remove(&fd);
         }
@@ -100,27 +101,27 @@ impl Server {
     }
 }
 
-impl AsFd for Server {
+impl<const REQUEST_SIZE: usize> AsFd for Server<REQUEST_SIZE> {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
     }
 }
 
-impl AsRawFd for Server {
+impl<const REQUEST_SIZE: usize> AsRawFd for Server<REQUEST_SIZE> {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
 }
 
-impl AsPollFd for Server {
+impl<const REQUEST_SIZE: usize> AsPollFd for Server<REQUEST_SIZE> {
     fn as_poll_fd(&self) -> PollFd<'_> {
         PollFd::new(&self.fd, PollFlags::IN)
     }
 }
 
-pub fn systemd_socket<S>() -> Result<OwnedFd, Error<S>>
+pub fn systemd_socket<const REQUEST_SIZE: usize, S>() -> Result<OwnedFd, Error<REQUEST_SIZE, S>>
 where
-    S: Service,
+    S: Service<REQUEST_SIZE>,
 {
     let fds = sd_listen_fds::get().map_err(|_| Error::FailedToGetSystemdProvidedSocket)?;
     let (_name, fd) = fds.into_iter().next().ok_or(Error::EmptySdListenFds)?;
@@ -129,9 +130,11 @@ where
     Ok(fd.into_std())
 }
 
-pub fn socket_at<S>(socket_path: &str) -> Result<OwnedFd, Error<S>>
+pub fn socket_at<const REQUEST_SIZE: usize, S>(
+    socket_path: &str,
+) -> Result<OwnedFd, Error<REQUEST_SIZE, S>>
 where
-    S: Service,
+    S: Service<REQUEST_SIZE>,
 {
     const SOMAXCONN: i32 = 4_096;
 
@@ -152,9 +155,11 @@ where
     Ok(fd)
 }
 
-fn ensure_addr_is_free<S>(addr: &SocketAddrUnix) -> Result<(), Error<S>>
+fn ensure_addr_is_free<const REQUEST_SIZE: usize, S>(
+    addr: &SocketAddrUnix,
+) -> Result<(), Error<REQUEST_SIZE, S>>
 where
-    S: Service,
+    S: Service<REQUEST_SIZE>,
 {
     let fd = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None)?;
     if rustix::net::connect(&fd, addr).is_ok() {

@@ -1,60 +1,108 @@
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
-
+use crate::AsPollFd;
 use rustix::{
     event::{PollFd, PollFlags},
     io::Errno,
     net::{RecvFlags, SendFlags},
 };
+use std::{
+    cmp::Ordering,
+    collections::VecDeque,
+    io::ErrorKind,
+    os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd},
+};
 
-use crate::AsPollFd;
-
-pub struct Client {
+pub struct Client<const REQUEST_SIZE: usize> {
     fd: OwnedFd,
+    readbuf: [u8; REQUEST_SIZE],
+    readpos: usize,
+    writebuf: VecDeque<Vec<u8>>,
 }
 
-impl Client {
+impl<const REQUEST_SIZE: usize> Client<REQUEST_SIZE> {
     pub(crate) const fn new(fd: OwnedFd) -> Self {
-        Self { fd }
-    }
-
-    pub(crate) fn read(&self) -> Result<(), ClientError> {
-        log::trace!("Reading 1 byte from client {}..", self.as_raw_fd());
-        let (bytes_read, _) = rustix::net::recv(&self.fd, &mut [0; 1], RecvFlags::empty())
-            .map_err(ClientError::Errno)?;
-        if bytes_read == 1 {
-            Ok(())
-        } else {
-            Err(ClientError::FailedToRead)
+        Self {
+            fd,
+            readbuf: [0; _],
+            readpos: 0,
+            writebuf: VecDeque::new(),
         }
     }
 
-    pub(crate) fn write(&self, buf: &[u8]) -> Result<(), ClientError> {
+    pub(crate) fn read_once(&mut self) -> Result<Option<[u8; REQUEST_SIZE]>, ClientError> {
+        log::trace!("Reading from client {}..", self.as_raw_fd());
+
+        let (bytes_read, _) = rustix::net::recv(
+            &self.fd,
+            &mut self.readbuf[self.readpos..],
+            RecvFlags::empty(),
+        )
+        .map_err(ClientError::Errno)?;
+        self.readpos = self
+            .readpos
+            .checked_add(bytes_read)
+            .ok_or(ClientError::FailedToRead)?;
+
+        match self.readpos.cmp(&REQUEST_SIZE) {
+            Ordering::Less => Ok(None),
+            Ordering::Equal => {
+                let mut readbuf = [0; REQUEST_SIZE];
+                std::mem::swap(&mut readbuf, &mut self.readbuf);
+                Ok(Some(readbuf))
+            }
+            Ordering::Greater => Err(ClientError::FailedToRead),
+        }
+    }
+
+    pub(crate) fn push(&mut self, buf: Vec<u8>) {
+        self.writebuf.push_back(buf);
+    }
+
+    pub(crate) fn write(&mut self) -> Result<(), ClientError> {
         log::trace!("Writing to client {}..", self.as_raw_fd());
-        let bytes_written =
-            rustix::net::send(&self.fd, buf, SendFlags::NOSIGNAL).map_err(ClientError::Errno)?;
-        if bytes_written == buf.len() {
-            Ok(())
-        } else {
-            Err(ClientError::FailedToWrite)
+
+        loop {
+            let Some(buf) = self.writebuf.front_mut() else {
+                return Ok(());
+            };
+
+            let bytes_written = match rustix::net::send(&self.fd, buf, SendFlags::NOSIGNAL) {
+                Ok(len) => len,
+                Err(err) if err.kind() == ErrorKind::WouldBlock => break,
+                Err(err) => return Err(ClientError::Errno(err)),
+            };
+            *buf = buf
+                .get(bytes_written..)
+                .ok_or(ClientError::FailedToWrite)?
+                .to_vec();
+
+            if buf.is_empty() {
+                self.writebuf.pop_front();
+            }
         }
+
+        Ok(())
     }
 }
 
-impl AsFd for Client {
+impl<const REQUEST_SIZE: usize> AsFd for Client<REQUEST_SIZE> {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
     }
 }
 
-impl AsRawFd for Client {
+impl<const REQUEST_SIZE: usize> AsRawFd for Client<REQUEST_SIZE> {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
 }
 
-impl AsPollFd for Client {
+impl<const REQUEST_SIZE: usize> AsPollFd for Client<REQUEST_SIZE> {
     fn as_poll_fd(&self) -> PollFd<'_> {
-        PollFd::new(self, PollFlags::IN)
+        let mut events = PollFlags::IN;
+        if !self.writebuf.is_empty() {
+            events |= PollFlags::OUT;
+        }
+        PollFd::new(self, events)
     }
 }
 

@@ -3,7 +3,7 @@ use rustix::event::{PollFd, PollFlags};
 /// A trait that your service must implement.
 ///
 /// Must be passed to on of `Runtime`'s constructors.
-pub trait Service {
+pub trait Service<const REQUEST_SIZE: usize> {
     /// A custom error type
     type Error: core::error::Error;
 
@@ -45,7 +45,18 @@ pub trait Service {
     /// May return an error that will be returned from `Runtime::poll()` once called
     fn on_poll_error(&mut self, fd: i32, revents: PollFlags) -> Result<(), Self::Error>;
 
-    /// When a new client connects you may want to automatically send "current state" of the service.
-    /// To do that implement this function and return all bytes you want to be sent on connecting.
-    fn state_as_serialized_bufs(&self) -> impl Iterator<Item = Vec<u8>>;
+    /// Called by `Runtime` when a new client connected. You may use this hook to "provision"
+    /// a client with current state.
+    ///
+    /// # Errors
+    ///
+    /// May return an error that will be returned from `Runtime::poll()` once called
+    fn on_client_connected(&mut self, write: impl FnMut(Vec<u8>)) -> Result<(), Self::Error>;
+
+    /// Called by `Runtime` when a new client is readable and is ready to send a request to you.
+    ///
+    /// # Errors
+    ///
+    /// May return an error that will be returned from `Runtime::poll()` once called
+    fn on_client_request(&mut self, request: [u8; REQUEST_SIZE]) -> Result<(), Self::Error>;
 }
