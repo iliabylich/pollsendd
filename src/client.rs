@@ -57,6 +57,7 @@ impl<const REQUEST_SIZE: usize> Client<REQUEST_SIZE> {
             Ordering::Equal => {
                 let mut readbuf = [0; REQUEST_SIZE];
                 std::mem::swap(&mut readbuf, &mut self.readbuf);
+                self.readpos = 0;
                 Ok(Some(readbuf))
             }
             Ordering::Greater => Err(ClientError::FailedToRead),
