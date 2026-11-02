@@ -1,0 +1,14 @@
+[tools]
+cargo-binstall = "latest"
+
+[task_config]
+shell = "bash -euo pipefail -c"
+
+[settings]
+cargo.binstall_quickinstall = true
+cargo.binstall_only = true
+
+[tasks.outdated]
+hide = true
+tools = { "cargo:cargo-outdated" = "latest" }
+run = "cargo outdated"
